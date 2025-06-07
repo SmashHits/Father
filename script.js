@@ -3,7 +3,7 @@ const BASE_HEIGHT = 224;
 const widescreen = false;
 const BASE_WIDTH = widescreen ? 384 : 256;
 const FRAME_DURATION = 1000 / 60; // 60 FPS
-const useCRT = true; // Toggle this to enable/disable CRT shader
+const useCRT = false; // Toggle this to enable/disable CRT shader
 let WALK_SPEED = 1.5;
 let DIAGONAL_SPEED = 1;
 
