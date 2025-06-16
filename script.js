@@ -1,122 +1,148 @@
 // ===== CONFIGURATION =====
-const BASE_HEIGHT = 224;
-const widescreen = false;
-const BASE_WIDTH = widescreen ? 384 : 256;
+const BASE_HEIGHT    = 224;
+const widescreen     = false;
+const BASE_WIDTH     = widescreen ? 384 : 256;
 const FRAME_DURATION = 1000 / 60; // 60 FPS
-const useCRT = false; // Toggle this to enable/disable CRT shader
-let WALK_SPEED = 1.5;
-let DIAGONAL_SPEED = 1;
+let useCRT           = false;
+let WALK_SPEED       = 1.5;
+let DIAGONAL_SPEED   = 1;           // hard‐lock to 1px per axis
 
-// ===== GAME CANVAS SETUP =====
-let gameCanvas, ctx;
-if (!useCRT) {
-  gameCanvas = document.createElement("canvas");
-  gameCanvas.width = BASE_WIDTH;
-  gameCanvas.height = BASE_HEIGHT;
-  ctx = gameCanvas.getContext("2d");
-  document.body.style.margin = "0";
-  document.body.style.overflow = "hidden";
-  document.body.style.backgroundColor = "black";
-  document.body.appendChild(gameCanvas);
+// ===== SETUP CANVAS =====
+const gameCanvas = document.createElement("canvas");
+gameCanvas.width  = BASE_WIDTH;
+gameCanvas.height = BASE_HEIGHT;
+const ctx = gameCanvas.getContext("2d");
+document.body.style.cssText = "margin:0;overflow:hidden;background:#000";
+document.body.appendChild(gameCanvas);
 
-  function resizeCanvas() {
-    const scaleX = window.innerWidth / BASE_WIDTH;
-    const scaleY = window.innerHeight / BASE_HEIGHT;
-    const scale = Math.min(scaleX, scaleY);
-
-    gameCanvas.style.width = `${BASE_WIDTH * scale}px`;
-    gameCanvas.style.height = `${BASE_HEIGHT * scale}px`;
-    gameCanvas.style.position = "absolute";
-    gameCanvas.style.left = `${(window.innerWidth - BASE_WIDTH * scale) / 2}px`;
-    gameCanvas.style.top = `${(window.innerHeight - BASE_HEIGHT * scale) / 2}px`;
-  }
-  window.addEventListener("resize", resizeCanvas);
-  resizeCanvas();
-} else {
-  // Offscreen canvas for CRT rendering
-  gameCanvas = document.createElement("canvas");
-  gameCanvas.style.display = "none";
-  gameCanvas.width = BASE_WIDTH;
-  gameCanvas.height = BASE_HEIGHT;
-  ctx = gameCanvas.getContext("2d");
+function resizeCanvas() {
+  const scale = Math.min(
+    window.innerWidth  / BASE_WIDTH,
+    window.innerHeight / BASE_HEIGHT
+  );
+  Object.assign(gameCanvas.style, {
+    width:    `${BASE_WIDTH * scale}px`,
+    height:   `${BASE_HEIGHT * scale}px`,
+    position: `absolute`,
+    left:     `${(window.innerWidth  - BASE_WIDTH  * scale) / 2}px`,
+    top:      `${(window.innerHeight - BASE_HEIGHT * scale) / 2}px`
+  });
 }
+window.addEventListener("resize", resizeCanvas);
+resizeCanvas();
 
 // ===== GLOBAL STATE =====
-let playerx = 100;
-let playery = 100;
+let playerX = 100,
+    playerY = 100;
+let walkFrame = 0,
+    walkTimer = 0;
+let direction = "down";
+let straightStepToggle = false;   // ← toggle for straight steps
 const keys = {};
+const directionMap = {
+  down:0, "down-right":1, right:2, "up-right":3,
+  up:4, "up-left":5, left:6, "down-left":7
+};
 
-const mapImage = new Image();
-mapImage.crossOrigin = "anonymous";
-mapImage.src = "map.png";
+// ===== LOAD IMAGES =====
+const assets = {
+  map:       new Image(),
+  collision: new Image(),
+  player:    new Image()
+};
+assets.map.src       = "assets/map.png";
+assets.collision.src = "assets/collision.png";
+assets.player.src    = "assets/player.png";
 
-const collisionImage = new Image();
-collisionImage.crossOrigin = "anonymous";
-collisionImage.src = "collision.png"; // Black = solid, White = walkable
+// collision offscreen cache
+const collisionCanvas = document.createElement("canvas");
+const collisionCtx    = collisionCanvas.getContext("2d");
+assets.collision.onload = () => {
+  collisionCanvas.width  = assets.collision.width;
+  collisionCanvas.height = assets.collision.height;
+  collisionCtx.drawImage(assets.collision, 0, 0);
+};
 
-// ===== INPUT HANDLING =====
+// ===== INPUT =====
 window.addEventListener("keydown", e => keys[e.key] = true);
-window.addEventListener("keyup", e => keys[e.key] = false);
+window.addEventListener("keyup",   e => keys[e.key] = false);
 
-// ===== UTILS =====
+// ===== UTILITIES: per-pixel check (temporary) =====
 function getCollisionPixel(x, y) {
   const tempCanvas = document.createElement("canvas");
-  const tempCtx = tempCanvas.getContext("2d");
-  tempCanvas.width = collisionImage.width;
-  tempCanvas.height = collisionImage.height;
-  tempCtx.drawImage(collisionImage, 0, 0);
-  return tempCtx.getImageData(x, y, 1, 1).data;
+  const tempCtx    = tempCanvas.getContext("2d");
+  tempCanvas.width  = assets.collision.width;
+  tempCanvas.height = assets.collision.height;
+  tempCtx.drawImage(assets.collision, 0, 0);
+  return tempCtx.getImageData(Math.floor(x), Math.floor(y), 1, 1).data;
 }
-
 function isWalkable(x, y) {
-  if (!collisionImage.complete) return true; // No collision yet
-  const pixel = getCollisionPixel(Math.floor(x), Math.floor(y));
-  return pixel[0] > 127; // Treat dark pixels as blocked
+  if (!assets.collision.complete) return true;
+  return getCollisionPixel(x, y)[0] > 127;
 }
 
-let walkFrameToggle = false;
-
+// ===== UPDATE + RENDER =====
 function update() {
-  let dx = 0;
-  let dy = 0;
+  const dx = (keys.ArrowRight|0) - (keys.ArrowLeft|0);
+  const dy = (keys.ArrowDown |0) - (keys.ArrowUp  |0);
 
-  if (keys["ArrowUp"]) dy -= 1;
-  if (keys["ArrowDown"]) dy += 1;
-  if (keys["ArrowLeft"]) dx -= 1;
-  if (keys["ArrowRight"]) dx += 1;
+  if (dx || dy) {
+    // set direction
+    if (dx>0 && dy>0)       direction = "down-right";
+    else if (dx>0 && dy<0)  direction = "up-right";
+    else if (dx<0 && dy>0)  direction = "down-left";
+    else if (dx<0 && dy<0)  direction = "up-left";
+    else if (dx>0)          direction = "right";
+    else if (dx<0)          direction = "left";
+    else if (dy>0)          direction = "down";
+    else                    direction = "up";
 
-  let isDiagonal = dx !== 0 && dy !== 0;
+    // compute integer step
+    let stepX = 0, stepY = 0;
+    if (dx && dy) {
+      // diagonal: always 1px each axis
+      stepX = dx * DIAGONAL_SPEED;
+      stepY = dy * DIAGONAL_SPEED;
+    } else {
+      // straight: toggle between 1px/2px
+      straightStepToggle = !straightStepToggle;
+      const s = straightStepToggle ? 2 : 1;
+      stepX = dx * s;
+      stepY = dy * s;
+    }
 
-  if (isDiagonal) {
-    dx *= DIAGONAL_SPEED;
-    dy *= DIAGONAL_SPEED;
-  } else if (dx !== 0 || dy !== 0) {
-    const speed = walkFrameToggle ? (WALK_SPEED * 2) * 2/3 : (WALK_SPEED * 2) * 1/3;
-    dx *= speed;
-    dy *= speed;
-  }
-  walkFrameToggle = !walkFrameToggle;
+    const nx = playerX + stepX;
+    const ny = playerY + stepY;
+    if (isWalkable(nx, ny)) {
+      playerX = nx;
+      playerY = ny;
+      walkTimer++;
+      if (walkTimer >= 8) {
+        walkTimer = 0;
+        walkFrame = (walkFrame === 1 ? 2 : 1);
+      }
+    }
 
-  let nextX = playerx + dx;
-  let nextY = playery + dy;
-
-  if (isWalkable(nextX, nextY)) {
-    playerx = nextX;
-    playery = nextY;
+  } else {
+    // idle
+    walkTimer = 0;
+    walkFrame = 0;
   }
 }
 
 function renderWorld() {
-  const offsetX = BASE_WIDTH / 2 - playerx;
-  const offsetY = BASE_HEIGHT / 2 - playery;
-  ctx.drawImage(mapImage, offsetX, offsetY);
+  const ox = BASE_WIDTH/2  - playerX;
+  const oy = BASE_HEIGHT/2 - playerY;
+  ctx.drawImage(assets.map, ox, oy);
 }
 
 function renderPlayer() {
-  const centerX = BASE_WIDTH / 2;
-  const centerY = BASE_HEIGHT / 2;
-  ctx.fillStyle = "red";
-  ctx.fillRect(centerX - 8, centerY - 8, 16, 16);
+  if (!assets.player.complete) return;
+  const cx = BASE_WIDTH/2 - 16;
+  const cy = BASE_HEIGHT/2 - 16;
+  const sx = walkFrame * 32;
+  const sy = directionMap[direction] * 32;
+  ctx.drawImage(assets.player, sx, sy, 32, 32, cx, cy, 32, 32);
 }
 
 function render() {
@@ -125,25 +151,21 @@ function render() {
   renderPlayer();
 }
 
-let lastFrameTime = 0;
-function gameLoop(timestamp) {
-  if (timestamp - lastFrameTime >= FRAME_DURATION) {
-    update();
-    render();
-    lastFrameTime = timestamp;
-  }
-  requestAnimationFrame(gameLoop);
+// ===== GAME LOOP =====
+function loop() {
+  update();
+  render();
+  setTimeout(loop, FRAME_DURATION);
 }
 
-let assetsLoaded = 0;
-function checkAssets() {
-  assetsLoaded++;
-  if (assetsLoaded === 2) requestAnimationFrame(gameLoop);
-}
-mapImage.onload = checkAssets;
-collisionImage.onload = checkAssets;
+// start when all assets are loaded
+Promise.all(
+  Object.values(assets).map(img =>
+    img.complete ? Promise.resolve() : new Promise(r => img.onload = r)
+  )
+).then(loop);
 
-// ===== CRT SHADER SETUP =====
+// CRT stuff
 if (useCRT) {
   const crtCanvas = document.createElement("canvas");
   crtCanvas.id = "crtCanvas";
@@ -241,7 +263,6 @@ if (useCRT) {
     crtCanvas.style.top = `${(window.innerHeight - crtCanvas.height) / 2}px`;
 
     gl.viewport(0, 0, crtCanvas.width, crtCanvas.height);
-
 
     gl.bindTexture(gl.TEXTURE_2D, texture);
     gl.texImage2D(
